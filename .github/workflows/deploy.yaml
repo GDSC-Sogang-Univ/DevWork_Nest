@@ -1,0 +1,77 @@
+name: Deploy to GKE by Username
+
+on:
+  push:
+    branches:
+      - 'deploy/production'
+      - 'deploy/alpha'
+
+env:
+  PROJECT_ID: sogang-devworks-2025
+  REGION: asia-northeast3
+  CLUSTER: sogang-devworks-cluster
+jobs:
+  deploy:
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set image version (commit hash + run number)
+        run: |
+          VERSION="$(git rev-parse --short HEAD)-${{ github.run_number }}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Set ENV_NAME from branch
+        run: |
+          echo "BRANCH_NAME=${GITHUB_REF#refs/heads/}" >> $GITHUB_ENV
+          echo "ENV_NAME=${GITHUB_REF#refs/heads/deploy/}" >> $GITHUB_ENV
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}'
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          install_components: 'gke-gcloud-auth-plugin'
+
+      - id: 'get-credentials'
+        uses: 'google-github-actions/get-gke-credentials@v2'
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+          location: ${{ env.REGION }}
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${REGION}-docker.pkg.dev
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${REGION}-docker.pkg.dev/${{ env.PROJECT_ID }}/${ENV_NAME}/devworks-nest:${VERSION} .
+          docker tag ${REGION}-docker.pkg.dev/${{ env.PROJECT_ID }}/${ENV_NAME}/devworks-nest:${VERSION} ${REGION}-docker.pkg.dev/${{ env.PROJECT_ID }}/${ENV_NAME}/devworks-nest:latest
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials $CLUSTER --region $REGION --project $PROJECT_ID
+
+      - name: Push Docker image to Artifact Registry
+        run: |
+          docker push ${REGION}-docker.pkg.dev/${{ env.PROJECT_ID }}/${ENV_NAME}/devworks-nest:${VERSION}
+          docker push ${REGION}-docker.pkg.dev/${{ env.PROJECT_ID }}/${ENV_NAME}/devworks-nest:latest
+
+      - name: Rollout restart deployment
+        run: |
+          kubectl set image deployment/devworks-nest devworks-nest=${REGION}-docker.pkg.dev/${{ env.PROJECT_ID }}/${ENV_NAME}/devworks-nest:${VERSION} -n ${ENV_NAME}
+
+      - name: Wait for rollout to finish
+
+        run: |
+          kubectl rollout status deployment/devworks-nest -n $ENV_NAME --timeout=300s
